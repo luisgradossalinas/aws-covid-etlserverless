@@ -1,0 +1,28 @@
+{
+    "CovidMatchTables": [
+        {
+            "PutRequest": {
+                "Item": {
+                    "id_source": {"S": "camasuci"},
+                    "crawler": {"S": "COVIDCamasUCI"}
+                }
+            }
+        },
+        {
+            "PutRequest": {
+                "Item": {
+                    "id_source": {"S": "casos"},
+                    "crawler": {"S": "COVIDCasosActuales"}
+                }
+            }
+        },
+        {
+            "PutRequest": {
+                "Item": {
+                    "id_source": {"S": "casosgeo"},
+                    "crawler": {"S": "COVIDCasosActualesGeo"}
+                }
+            }
+        }
+    ]
+}
