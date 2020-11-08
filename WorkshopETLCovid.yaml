@@ -26,15 +26,126 @@ Parameters:
     Default: CovidMatchTables
 Resources:
   BucketRaw:
-    Type: 'AWS::S3::Bucket'
+    Type: AWS::S3::Bucket
+    DependsOn:
+      - ProcessingLambdaPermission
     Properties:
       BucketName: !Join [ -, [ !Ref S3BucketRaw, !Ref AWS::AccountId ] ]
+      NotificationConfiguration:
+        LambdaConfigurations:
+          - Event: s3:ObjectCreated:*
+            Function: !GetAtt MyFunctionLambda.Arn
+            Filter:
+              S3Key:
+                Rules:
+                - Name: prefix #suffix
+                  Value: data/schema/covid/
   BucketStage:
     Type: 'AWS::S3::Bucket'
     Properties:
       BucketName: !Join [ -, [ !Ref S3BucketStage, !Ref AWS::AccountId ] ]
+  ProcessingLambdaPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: 'lambda:InvokeFunction'
+      FunctionName: !Ref MyFunctionLambda
+      Principal: s3.amazonaws.com
+      SourceArn: !Sub 'arn:aws:s3:::${S3BucketRaw}-${AWS::AccountId}'
+      SourceAccount: !Ref AWS::AccountId
+  ProcessingLambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service:
+            - lambda.amazonaws.com
+          Action:
+          - sts:AssumeRole
+      Policies:
+        - PolicyName: allowLogging
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+            - Effect: Allow
+              Action:
+              - logs:*
+              Resource: arn:aws:logs:*:*:*
+        - PolicyName: getAndDeleteObjects
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+            - Effect: Allow
+              Action:
+              - dynamodb:GetItem
+              - glue:StartCrawler
+              - s3:GetObject
+              Resource:  
+              - !Sub 'arn:aws:s3:::${S3BucketRaw}-${AWS::AccountId}/*'
+              - !GetAtt MyDynamoDBTable.Arn
+              - '*'
+  MyFunctionLambda:
+    Type: AWS::Lambda::Function
+    DependsOn: 
+      - MyDynamoDBTable
+    Properties:
+      FunctionName: ExecuteStartCrawler
+      Environment:
+        Variables:
+         table: !Ref MyDynamoDBTable
+      Code:
+        ZipFile: |
+            import json
+            import boto3
+            import sys, os
+            from botocore.exceptions import ClientError
+            
+            glue = boto3.client("glue")
+            dynamodb = boto3.resource('dynamodb')
+            
+            def lambda_handler(event, context):
+                
+                s3_bucket = event['Records'][0]['s3']['bucket']['name']
+                s3_object = event['Records'][0]['s3']['object']['key']
+                
+                parse_id_source = s3_object.split('/')[3]
+                table = dynamodb.Table(os.environ['table'])
+            
+                try:
+                    response = table.get_item(Key = {'id_source': parse_id_source})
+                except ClientError as e:
+                    print(e.response['Error']['Message'])
+                
+                crawler = response['Item']['crawler']
+                execute_crawler = glue.start_crawler(Name = crawler)
+                
+                return {
+                    'statusCode': 200,
+                    'body': json.dumps('Crawler en ejecución')
+                }
+      Handler: index.lambda_handler
+      Role: !GetAtt ProcessingLambdaExecutionRole.Arn
+      Runtime: python3.7
+      MemorySize: 128
+      Timeout: 300
+  MyDynamoDBTable: 
+    Type: AWS::DynamoDB::Table
+    Properties: 
+        TableName: !Ref DynamoDBTableName
+        AttributeDefinitions: 
+        - 
+          AttributeName: "id_source"
+          AttributeType: "S"
+        KeySchema: 
+        - 
+          AttributeName: "id_source"
+          KeyType: "HASH"
+        BillingMode : PAY_PER_REQUEST
   MyRole:
     Type: AWS::IAM::Role
+    DependsOn: BucketRaw
     Properties:
       RoleName: !Ref RoleGlue
       AssumeRolePolicyDocument:
@@ -69,6 +180,7 @@ Resources:
                 - !Sub 'arn:aws:s3:::${BucketStage}/*'
   GlueDatabaseRaw:
     Type: "AWS::Glue::Database"
+    DependsOn: BucketRaw
     Properties:
       DatabaseInput:
         Description: "Base de datos de Glue - Raw"
@@ -76,6 +188,7 @@ Resources:
       CatalogId: !Ref AWS::AccountId
   GlueDatabaseStage:
     Type: "AWS::Glue::Database"
+    DependsOn: BucketRaw
     Properties:
       DatabaseInput:
         Description: "Base de datos de Glue - Stage"
@@ -83,6 +196,7 @@ Resources:
       CatalogId: !Ref AWS::AccountId
   CrawlerCamasUCI:
     Type: AWS::Glue::Crawler
+    DependsOn: GlueDatabaseRaw
     Properties:
       Name: "COVIDCamasUCI"
       Role: !GetAtt MyRole.Arn
@@ -95,6 +209,7 @@ Resources:
         DeleteBehavior: "LOG"
   CrawlerCasosMundial:
     Type: AWS::Glue::Crawler
+    DependsOn: GlueDatabaseRaw
     Properties:
       Name: "COVIDCasosActuales"
       Role: !GetAtt MyRole.Arn
@@ -107,6 +222,7 @@ Resources:
         DeleteBehavior: "LOG"
   CrawlerCasosMundialGeo:
     Type: AWS::Glue::Crawler
+    DependsOn: GlueDatabaseRaw
     Properties:
       Name: "COVIDCasosActualesGeo"
       Role: !GetAtt MyRole.Arn
@@ -119,6 +235,7 @@ Resources:
         DeleteBehavior: "LOG"
   CrawlerCasosCamasUci:
     Type: AWS::Glue::Crawler
+    DependsOn: GlueDatabaseStage
     Properties:
       Name: "COVIDCasosCamasUci"
       Role: !GetAtt MyRole.Arn
@@ -129,94 +246,3 @@ Resources:
       SchemaChangePolicy:
         UpdateBehavior: "UPDATE_IN_DATABASE"
         DeleteBehavior: "LOG"
-  MyDynamoDBTable: 
-    Type: AWS::DynamoDB::Table
-    Properties: 
-        TableName: !Ref DynamoDBTableName
-        AttributeDefinitions: 
-        - 
-          AttributeName: "id_source"
-          AttributeType: "S"
-        KeySchema: 
-        - 
-          AttributeName: "id_source"
-          KeyType: "HASH"
-        BillingMode : PAY_PER_REQUEST
-  MyFunctionLambda:
-    Type: 'AWS::Lambda::Function'
-    DependsOn: 
-    - MyDynamoDBTable
-    Properties:
-      FunctionName: ExecuteStartCrawler
-      Handler: index.lambda_handler
-      MemorySize: 128
-      Runtime: python3.7
-      Timeout: 300
-      Environment:
-        Variables:
-         table: !Ref MyDynamoDBTable
-      Role: !GetAtt LambdaExecutionRole.Arn
-      Code:
-        ZipFile: |
-            import json
-            import boto3
-            import sys, os
-            from botocore.exceptions import ClientError
-            
-            glue = boto3.client("glue")
-            dynamodb = boto3.resource('dynamodb')
-            
-            def lambda_handler(event, context):
-                
-                s3_bucket = event['Records'][0]['s3']['bucket']['name']
-                s3_object = event['Records'][0]['s3']['object']['key']
-                
-                parse_id_source = s3_object.split('/')[3]
-                table = dynamodb.Table(os.environ['table'])
-            
-                try:
-                    response = table.get_item(Key = {'id_source': parse_id_source})
-                except ClientError as e:
-                    print(e.response['Error']['Message'])
-                
-                crawler = response['Item']['crawler']
-                execute_crawler = glue.start_crawler(Name = crawler)
-                
-                return {
-                    'statusCode': 200,
-                    'body': json.dumps('Crawler en ejecución')
-                }
-  LambdaExecutionRole:
-      Type: AWS::IAM::Role
-      Properties:
-        AssumeRolePolicyDocument:
-          Version: '2012-10-17'
-          Statement:
-          - Effect: Allow
-            Principal:
-              Service:
-              - lambda.amazonaws.com
-            Action:
-            - sts:AssumeRole
-        Path: "/"
-        Policies:
-        - PolicyName: root
-          PolicyDocument:
-            Version: '2012-10-17'
-            Statement:
-            - Effect: Allow
-              Action:
-              - logs:CreateLogStream
-              - logs:PutLogEvents
-              - logs:CreateLogGroup
-              - dynamodb:GetItem
-              - glue:StartCrawler
-              - s3:PutObject
-              - s3:GetObject
-              - s3:DeleteObject
-              Resource:
-              - !GetAtt MyDynamoDBTable.Arn
-              - !Sub 'arn:aws:logs:${AWS::Region}:${AWS::AccountId}:*'
-              - !Sub 'arn:aws:s3:::${BucketRaw}'
-              - !Sub 'arn:aws:s3:::${BucketRaw}/*'
-              - '*'
